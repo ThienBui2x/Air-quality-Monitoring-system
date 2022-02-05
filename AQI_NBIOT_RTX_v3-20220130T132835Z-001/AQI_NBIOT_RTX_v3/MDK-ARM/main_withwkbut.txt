@@ -1,0 +1,856 @@
+/* USER CODE BEGIN Header */
+/**
+  ******************************************************************************
+  * @file           : main.c
+  * @brief          : Main program body
+  ******************************************************************************
+  ** This notice applies to any and all portions of this file
+  * that are not between comment pairs USER CODE BEGIN and
+  * USER CODE END. Other portions of this file, whether 
+  * inserted by the user or by software development tools
+  * are owned by their respective copyright owners.
+  *
+  * COPYRIGHT(c) 2020 STMicroelectronics
+  *
+  * Redistribution and use in source and binary forms, with or without modification,
+  * are permitted provided that the following conditions are met:
+  *   1. Redistributions of source code must retain the above copyright notice,
+  *      this list of conditions and the following disclaimer.
+  *   2. Redistributions in binary form must reproduce the above copyright notice,
+  *      this list of conditions and the following disclaimer in the documentation
+  *      and/or other materials provided with the distribution.
+  *   3. Neither the name of STMicroelectronics nor the names of its contributors
+  *      may be used to endorse or promote products derived from this software
+  *      without specific prior written permission.
+  *
+  * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+  * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+  * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+  * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+  * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+  * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+  * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+  * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+  * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+  *
+  ******************************************************************************
+  */
+/* USER CODE END Header */
+
+/* Includes ------------------------------------------------------------------*/
+#include "main.h"
+
+/* Private includes ----------------------------------------------------------*/
+/* USER CODE BEGIN Includes */
+#include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
+
+#include "ssd1306.h"
+#include "bmp280.h"
+#include "GPS.h"
+/* USER CODE END Includes */
+
+/* Private typedef -----------------------------------------------------------*/
+/* USER CODE BEGIN PTD */
+
+/* USER CODE END PTD */
+
+/* Private define ------------------------------------------------------------*/
+/* USER CODE BEGIN PD */
+
+/* USER CODE END PD */
+
+/* Private macro -------------------------------------------------------------*/
+/* USER CODE BEGIN PM */
+#define    INTERVAL           1                      // sending data interval = 5 minutes
+#define    PMS_WK_TIME        80                     // PMS waking-up time (seconds) = 80-30=50s before reading data
+#define    PMS_READ_TIME      30                     // time of reading sensors (seconds) before sending
+#define    TIM_TICK           1000                   // Timer tick (miliseconds) = 1s
+#define    SYS_CNT_MAX        (TIM_TICK*60*INTERVAL) // 1000*(1ms)*60*INTERVAL = number of minutes/sending data
+#define    SYS_CNT_WKPMS      ((TIM_TICK*60*INTERVAL)-(TIM_TICK*PMS_WK_TIME))   // time to wake up PMS sensor, at least 30s before sending data
+#define    SYS_CNT_READ       ((TIM_TICK*60*INTERVAL)-(TIM_TICK*PMS_READ_TIME)) // time to read sensors, PMS_READ_TIME from sending
+#define    DATA_LEN           100
+#define    OLED_OFF           5000                   // 5000*1ms=5s
+
+#define	   _ESP8266_USART			huart1
+#define	   _PMS_USART			    huart3
+
+#define	   _BME280_I2C		    hi2c1
+/* USER CODE END PM */
+
+/* Private variables ---------------------------------------------------------*/
+I2C_HandleTypeDef hi2c1;
+
+TIM_HandleTypeDef htim6;
+
+UART_HandleTypeDef huart1;
+UART_HandleTypeDef huart2;
+UART_HandleTypeDef huart3;
+
+/* USER CODE BEGIN PV */
+
+// SYSTEM COUNTER
+uint32_t sys_cnt=0;
+
+// PMS
+uint8_t pms_rx_data_firstbyte=0;
+uint8_t pms_rx_data_tmp=0;
+uint8_t pms_rx_index=1;
+uint8_t pms_rx_data[32]={0};
+uint16_t cs_cal=0;
+uint16_t cs_read=0;
+uint16_t cnt=0;
+uint8_t pms_data_valid=0; //0:data invalid; 1: data valid
+
+uint8_t send_cnt=0;
+
+//GPS
+uint8_t gps_data_valid=0; //0:data invalid; 1: data valid
+
+// BME 280
+BMP280_HandleTypedef bmp280;
+bool bme280p;
+float pressure=0, temperature=0, humidity=0,altitude=0;
+uint8_t Data[256];
+
+//OLED
+uint8_t  oled_cnt_test=0,led_on=0,led_off=0;
+uint32_t oled_cnt=0;
+
+//Send data
+char sendingData[DATA_LEN]={0};
+uint16_t pms_pm1_0_validdata;
+uint16_t pms_pm2_5_validdata;
+uint16_t pms_pm10_0_validdata;
+
+uint8_t data_len=0;
+
+char CMD1[] = "%A%B%C%D%E%F%G%H%I%*"; // for testing only
+
+/* USER CODE END PV */
+
+/* Private function prototypes -----------------------------------------------*/
+void SystemClock_Config(void);
+static void MX_GPIO_Init(void);
+static void MX_I2C1_Init(void);
+static void MX_USART1_UART_Init(void);
+static void MX_USART2_UART_Init(void);
+static void MX_TIM6_Init(void);
+static void MX_USART3_UART_Init(void);
+/* USER CODE BEGIN PFP */
+
+//TIM:tick=1ms
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim);
+
+// PMS
+void PMS_Init(void);
+void sleepPMS(void);
+void wakeupPMS(void);
+void readPMS(void);
+
+// BME280
+void BME280_Init(void);
+void readBME280(void);
+
+//GPS
+
+
+//Send data via UART
+void sendData(void);
+
+//MUX
+void mux_enable(void);
+void mux_disable(void);
+void mux_sel(uint8_t channel);
+
+//OLED
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin);
+
+/* USER CODE END PFP */
+
+/* Private user code ---------------------------------------------------------*/
+/* USER CODE BEGIN 0 */
+
+/* USER CODE END 0 */
+
+/**
+  * @brief  The application entry point.
+  * @retval int
+  */
+int main(void)
+{
+  /* USER CODE BEGIN 1 */
+
+  /* USER CODE END 1 */
+
+  /* MCU Configuration--------------------------------------------------------*/
+
+  /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
+  HAL_Init();
+
+  /* USER CODE BEGIN Init */
+
+  /* USER CODE END Init */
+
+  /* Configure the system clock */
+  SystemClock_Config();
+
+  /* USER CODE BEGIN SysInit */
+
+  /* USER CODE END SysInit */
+
+  /* Initialize all configured peripherals */
+  MX_GPIO_Init();
+  MX_I2C1_Init();
+  MX_USART1_UART_Init();
+  MX_USART2_UART_Init();
+  MX_TIM6_Init();
+  MX_USART3_UART_Init();
+  /* USER CODE BEGIN 2 */
+		
+	// TIM6: tick = 1ms
+	HAL_TIM_Base_Start_IT(&htim6);
+	
+	//PMS
+	PMS_Init();
+	
+	//MUX enable
+	mux_enable();
+  
+	//OLED
+	ssd1306_Init();
+	ssd1306_WriteCommand(0xAE); //display off
+	
+	//PMS5003
+		
+	//BME280
+	BME280_Init();
+		
+	//GPS
+	GPS_Init();
+	
+  /* USER CODE END 2 */
+
+  /* Infinite loop */
+  /* USER CODE BEGIN WHILE */
+  while (1)
+  {
+    /* USER CODE END WHILE */
+
+    /* USER CODE BEGIN 3 */
+		
+		if (led_on==1) {
+ 	    ssd1306_WriteCommand(0xAF); //--turn on SSD1306 panel		 
+		  HAL_Delay(1000);
+		  ssd1306_Fill(Black);
+		  
+			// Line 1: pm 1.0
+			ssd1306_SetCursor(1, 0);
+			char buff_pm1[15];
+		  snprintf(buff_pm1, sizeof(buff_pm1), "PM 1.0: %d", pms_pm1_0_validdata);
+			ssd1306_WriteString(buff_pm1,Font_7x10, White);
+			
+			// Line 2: pm 2.5
+			ssd1306_SetCursor(1, 11);
+			char buff_pm2_5[15];
+		  snprintf(buff_pm2_5, sizeof(buff_pm2_5), "PM 2.5: %d", pms_pm2_5_validdata);
+			ssd1306_WriteString(buff_pm2_5,Font_7x10, White);
+			
+			// Line 3: pm 10.0
+			ssd1306_SetCursor(1, 22);
+			char buff_pm10[15];
+		  snprintf(buff_pm10, sizeof(buff_pm10), "PM 10.0: %d", pms_pm10_0_validdata);
+			ssd1306_WriteString(buff_pm10,Font_7x10, White);
+			
+			// Line 4: Humidity
+			ssd1306_SetCursor(1, 33);
+			char buff_hum[15];
+		  snprintf(buff_hum, sizeof(buff_hum), "Hum(%%): %d", (uint8_t)humidity);
+			ssd1306_WriteString(buff_hum,Font_7x10, White);
+			
+			// Line 5: Temperature
+			ssd1306_SetCursor(1, 44);
+			char buff_temp[15];
+		  snprintf(buff_temp, sizeof(buff_temp), "Temp(oC): %d", (uint8_t)temperature);
+			ssd1306_WriteString(buff_temp,Font_7x10, White);
+								
+			// Line 6: Pressure
+			ssd1306_SetCursor(1, 54);
+			char buff_pres[18];
+		  snprintf(buff_pres, sizeof(buff_pres), "Pressure: %d", (uint32_t)pressure);
+			ssd1306_WriteString(buff_pres,Font_7x10, White);
+			
+			ssd1306_UpdateScreen();			
+			oled_cnt=sys_cnt;
+      led_on=0;
+			led_off=1;
+		} 
+		
+		if( ((sys_cnt-oled_cnt) > OLED_OFF) && (led_off==1)) {
+		  ssd1306_WriteCommand(0xAE); //display off
+			led_on=0;
+			led_off=0;
+    }	
+		
+		if(sys_cnt==SYS_CNT_WKPMS)      // wake-up dust sensor  (5 phut - 80s)
+		{			
+			wakeupPMS();												
+		}
+		else if(sys_cnt==SYS_CNT_READ)  // read sensors (5 phut-30s) -> Time from waking-up to sending data = 80-30=50s
+		{
+			//Read GPS : MUX TX_1/RX_1			
+			mux_sel(1);			
+			HAL_Delay(1000);
+			
+			GPS_Process();
+								
+			//Read BME280
+			readBME280();				
+			
+			// Read PMS
+			readPMS();
+			
+			HAL_Delay(5000);
+			
+			// Send data:MUX TX_8/RX_8
+			mux_sel(8);			
+			HAL_Delay(1000);
+			
+		}
+		else if(sys_cnt==SYS_CNT_MAX)  // sending data, then sleep dust sensor
+		{						
+			HAL_Delay(5000);
+			
+			sendData();
+			
+			HAL_Delay(5000);
+												
+			// PMS SLEEP
+			sleepPMS();			
+		}
+
+  }// while loop
+  /* USER CODE END 3 */
+}
+
+/**
+  * @brief System Clock Configuration
+  * @retval None
+  */
+void SystemClock_Config(void)
+{
+  RCC_OscInitTypeDef RCC_OscInitStruct = {0};
+  RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
+
+  /** Configure the main internal regulator output voltage 
+  */
+  __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE1);
+  /** Initializes the CPU, AHB and APB busses clocks 
+  */
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_MSI;
+  RCC_OscInitStruct.MSIState = RCC_MSI_ON;
+  RCC_OscInitStruct.MSICalibrationValue = 0;
+  RCC_OscInitStruct.MSIClockRange = RCC_MSIRANGE_6;
+  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_NONE;
+  if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /** Initializes the CPU, AHB and APB busses clocks 
+  */
+  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
+                              |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
+  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_MSI;
+  RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
+  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;
+  RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
+
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_0) != HAL_OK)
+  {
+    Error_Handler();
+  }
+}
+
+/**
+  * @brief I2C1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_I2C1_Init(void)
+{
+
+  /* USER CODE BEGIN I2C1_Init 0 */
+
+  /* USER CODE END I2C1_Init 0 */
+
+  /* USER CODE BEGIN I2C1_Init 1 */
+
+  /* USER CODE END I2C1_Init 1 */
+  hi2c1.Instance = I2C1;
+  hi2c1.Init.ClockSpeed = 100000;
+  hi2c1.Init.DutyCycle = I2C_DUTYCYCLE_2;
+  hi2c1.Init.OwnAddress1 = 0;
+  hi2c1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
+  hi2c1.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
+  hi2c1.Init.OwnAddress2 = 0;
+  hi2c1.Init.GeneralCallMode = I2C_GENERALCALL_DISABLE;
+  hi2c1.Init.NoStretchMode = I2C_NOSTRETCH_DISABLE;
+  if (HAL_I2C_Init(&hi2c1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN I2C1_Init 2 */
+
+  /* USER CODE END I2C1_Init 2 */
+
+}
+
+/**
+  * @brief TIM6 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM6_Init(void)
+{
+
+  /* USER CODE BEGIN TIM6_Init 0 */
+
+  /* USER CODE END TIM6_Init 0 */
+
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+
+  /* USER CODE BEGIN TIM6_Init 1 */
+
+  /* USER CODE END TIM6_Init 1 */
+  htim6.Instance = TIM6;
+  htim6.Init.Prescaler = 3;
+  htim6.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim6.Init.Period = 999;
+  htim6.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim6) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim6, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM6_Init 2 */
+
+  /* USER CODE END TIM6_Init 2 */
+
+}
+
+/**
+  * @brief USART1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_USART1_UART_Init(void)
+{
+
+  /* USER CODE BEGIN USART1_Init 0 */
+
+  /* USER CODE END USART1_Init 0 */
+
+  /* USER CODE BEGIN USART1_Init 1 */
+
+  /* USER CODE END USART1_Init 1 */
+  huart1.Instance = USART1;
+  huart1.Init.BaudRate = 9600;
+  huart1.Init.WordLength = UART_WORDLENGTH_8B;
+  huart1.Init.StopBits = UART_STOPBITS_1;
+  huart1.Init.Parity = UART_PARITY_NONE;
+  huart1.Init.Mode = UART_MODE_TX_RX;
+  huart1.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart1.Init.OverSampling = UART_OVERSAMPLING_16;
+  if (HAL_UART_Init(&huart1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN USART1_Init 2 */
+
+  /* USER CODE END USART1_Init 2 */
+
+}
+
+/**
+  * @brief USART2 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_USART2_UART_Init(void)
+{
+
+  /* USER CODE BEGIN USART2_Init 0 */
+
+  /* USER CODE END USART2_Init 0 */
+
+  /* USER CODE BEGIN USART2_Init 1 */
+
+  /* USER CODE END USART2_Init 1 */
+  huart2.Instance = USART2;
+  huart2.Init.BaudRate = 9600;
+  huart2.Init.WordLength = UART_WORDLENGTH_8B;
+  huart2.Init.StopBits = UART_STOPBITS_1;
+  huart2.Init.Parity = UART_PARITY_NONE;
+  huart2.Init.Mode = UART_MODE_TX_RX;
+  huart2.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart2.Init.OverSampling = UART_OVERSAMPLING_16;
+  if (HAL_UART_Init(&huart2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN USART2_Init 2 */
+
+  /* USER CODE END USART2_Init 2 */
+
+}
+
+/**
+  * @brief USART3 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_USART3_UART_Init(void)
+{
+
+  /* USER CODE BEGIN USART3_Init 0 */
+
+  /* USER CODE END USART3_Init 0 */
+
+  /* USER CODE BEGIN USART3_Init 1 */
+
+  /* USER CODE END USART3_Init 1 */
+  huart3.Instance = USART3;
+  huart3.Init.BaudRate = 9600;
+  huart3.Init.WordLength = UART_WORDLENGTH_8B;
+  huart3.Init.StopBits = UART_STOPBITS_1;
+  huart3.Init.Parity = UART_PARITY_NONE;
+  huart3.Init.Mode = UART_MODE_TX_RX;
+  huart3.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart3.Init.OverSampling = UART_OVERSAMPLING_16;
+  if (HAL_UART_Init(&huart3) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN USART3_Init 2 */
+
+  /* USER CODE END USART3_Init 2 */
+
+}
+
+/**
+  * @brief GPIO Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_GPIO_Init(void)
+{
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
+
+  /* GPIO Ports Clock Enable */
+  __HAL_RCC_GPIOC_CLK_ENABLE();
+  __HAL_RCC_GPIOH_CLK_ENABLE();
+  __HAL_RCC_GPIOA_CLK_ENABLE();
+  __HAL_RCC_GPIOB_CLK_ENABLE();
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(Enable_GPIO_Port, Enable_Pin, GPIO_PIN_SET);
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOA, PMS_SET_Pin|PMS_RESET_Pin, GPIO_PIN_SET);
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOA, S0_Pin|S1_Pin|S2_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin : Enable_Pin */
+  GPIO_InitStruct.Pin = Enable_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
+  HAL_GPIO_Init(Enable_GPIO_Port, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : OLED_WK_Pin */
+  GPIO_InitStruct.Pin = OLED_WK_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
+  GPIO_InitStruct.Pull = GPIO_PULLDOWN;
+  HAL_GPIO_Init(OLED_WK_GPIO_Port, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : NBIOT_WK_Pin */
+  GPIO_InitStruct.Pin = NBIOT_WK_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  HAL_GPIO_Init(NBIOT_WK_GPIO_Port, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : PMS_SET_Pin PMS_RESET_Pin */
+  GPIO_InitStruct.Pin = PMS_SET_Pin|PMS_RESET_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : S0_Pin S1_Pin S2_Pin */
+  GPIO_InitStruct.Pin = S0_Pin|S1_Pin|S2_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+  /* EXTI interrupt init*/
+  HAL_NVIC_SetPriority(EXTI0_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(EXTI0_IRQn);
+
+}
+
+/* USER CODE BEGIN 4 */
+
+// init program: PMS goes to sleep mode
+void init_prog(void) {
+	HAL_GPIO_WritePin(PMS_RESET_GPIO_Port,PMS_RESET_Pin,GPIO_PIN_SET); // not reset
+	HAL_GPIO_WritePin(PMS_SET_GPIO_Port,PMS_SET_Pin,GPIO_PIN_RESET);   // sleep mode
+}
+
+
+// TIM 6: tick=1ms
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+	if(htim->Instance == htim6.Instance) {
+		if(sys_cnt==SYS_CNT_MAX) {
+		  sys_cnt=0;
+		} else {
+			sys_cnt++;
+		}
+	}
+}
+
+// PMS
+void PMS_Init(void) {
+	HAL_GPIO_WritePin(PMS_RESET_GPIO_Port,PMS_RESET_Pin,GPIO_PIN_SET); // not reset
+	HAL_GPIO_WritePin(PMS_SET_GPIO_Port,PMS_SET_Pin,GPIO_PIN_RESET);   // sleep mode
+}
+
+void sleepPMS(void) {
+	HAL_GPIO_WritePin(PMS_SET_GPIO_Port,PMS_SET_Pin,GPIO_PIN_RESET);   // enter sleep mode
+}
+
+void wakeupPMS(void) {
+	HAL_GPIO_WritePin(PMS_SET_GPIO_Port,PMS_SET_Pin,GPIO_PIN_SET );    // quit sleep mode
+}
+
+void readPMS(void)
+{
+	
+	HAL_UART_Receive(&_PMS_USART,&pms_rx_data_firstbyte,1,1000);
+		
+	while(pms_rx_data_firstbyte != 0x42){
+		HAL_UART_Receive(&_PMS_USART,&pms_rx_data_firstbyte,1,1000);
+	}
+	
+	if(pms_rx_data_firstbyte==0x42) {
+	  pms_rx_data[0]=pms_rx_data_firstbyte;
+	}
+	
+	pms_rx_data_firstbyte=0;
+	
+	while(pms_rx_index<32)
+	{
+	   HAL_UART_Receive(&_PMS_USART,&pms_rx_data_tmp,1,1000);
+		 if(pms_rx_data_tmp!=0x42) {
+	     pms_rx_data[pms_rx_index]=pms_rx_data_tmp;
+			 pms_rx_index++;
+		 }
+	}
+	
+	pms_rx_index=1;
+	
+	cs_read = ((uint16_t)pms_rx_data[30] << 8) | (uint16_t)pms_rx_data[31];
+	
+	cs_cal=0;
+	
+	for(int i=0;i<30;i++)
+	{
+	   cs_cal += pms_rx_data[i];
+	}	
+	
+	if (cs_read==cs_cal) {
+	  pms_data_valid=1;
+	}
+	else {
+	  pms_data_valid=0;
+	}
+	
+}
+
+//BME280
+void BME280_Init(void) {
+	bmp280_init_default_params(&bmp280.params);
+	bmp280.addr = BMP280_I2C_ADDRESS_0;
+	bmp280.i2c = &_BME280_I2C;
+	
+	while (!bmp280_init(&bmp280, &bmp280.params)) {
+		HAL_Delay(2000);
+	}
+	
+	bme280p = bmp280.id == BME280_CHIP_ID;
+}
+
+void readBME280(void) {
+
+  HAL_Delay(100);
+	while (!bmp280_read_float(&bmp280, &temperature, &pressure, &humidity)) {		
+	  HAL_Delay(2000);
+	}
+
+	if (bme280p) {			
+	}
+	
+	else {
+			
+	}
+	HAL_Delay(2000);
+			
+}
+
+//Send data
+void sendData(void) {
+	
+	send_cnt++;
+	uint16_t pm_1_0  = ((uint16_t)pms_rx_data[4] << 8) | (uint16_t)pms_rx_data[5];
+	uint16_t pm_2_5  = ((uint16_t)pms_rx_data[6] << 8) | (uint16_t)pms_rx_data[7];
+	uint16_t pm_10_0 = ((uint16_t)pms_rx_data[8] << 8) | (uint16_t)pms_rx_data[9];
+		
+	if(pms_data_valid==1)
+	{
+		pms_pm1_0_validdata=pm_1_0;
+		pms_pm2_5_validdata=pm_2_5;
+		pms_pm10_0_validdata=pm_10_0;
+	}
+	
+	sprintf(sendingData,"%%%04d%%%04d%%%04d%%%04d%%%04d%%%06d%%%04d%%%d%%%d%%*",
+	                     pms_pm1_0_validdata,pms_pm2_5_validdata,pms_pm10_0_validdata,
+	                     (uint8_t)temperature,(uint8_t)humidity,(uint32_t)pressure,(uint16_t)altitude,
+	                     (uint8_t)GPS.GPGGA.LongitudeDecimal,(uint8_t)GPS.GPGGA.LatitudeDecimal);
+	
+	data_len=strlen(sendingData);
+	HAL_UART_Transmit(&_ESP8266_USART,(uint8_t *)sendingData,data_len,2000);	
+	
+}
+
+// Mux
+
+//Mux ENANLE
+void mux_enable(void) {
+	HAL_GPIO_WritePin(Enable_GPIO_Port,Enable_Pin,GPIO_PIN_RESET);
+}
+
+//MUX DISABLE
+void mux_disable(void) {
+	HAL_GPIO_WritePin(Enable_GPIO_Port,Enable_Pin,GPIO_PIN_SET);
+}
+
+//MUX SELECT
+void mux_sel(uint8_t channel) {   
+  switch (channel) {
+		// channel 1 
+		case 1:
+			HAL_GPIO_WritePin(S2_GPIO_Port,S2_Pin,GPIO_PIN_RESET);
+			HAL_GPIO_WritePin(S1_GPIO_Port,S1_Pin,GPIO_PIN_RESET);
+			HAL_GPIO_WritePin(S0_GPIO_Port,S0_Pin,GPIO_PIN_RESET);  
+			break;
+		// channel 2
+		case 2:
+			HAL_GPIO_WritePin(S2_GPIO_Port,S2_Pin,GPIO_PIN_RESET);
+			HAL_GPIO_WritePin(S1_GPIO_Port,S1_Pin,GPIO_PIN_RESET);
+			HAL_GPIO_WritePin(S0_GPIO_Port,S0_Pin,GPIO_PIN_SET);  
+			break;
+		// channel 3
+		case 3:
+			HAL_GPIO_WritePin(S2_GPIO_Port,S2_Pin,GPIO_PIN_RESET);
+			HAL_GPIO_WritePin(S1_GPIO_Port,S1_Pin,GPIO_PIN_SET);
+			HAL_GPIO_WritePin(S0_GPIO_Port,S0_Pin,GPIO_PIN_RESET);  
+			break;
+		// channel 4
+		case 4:
+			HAL_GPIO_WritePin(S2_GPIO_Port,S2_Pin,GPIO_PIN_RESET);
+			HAL_GPIO_WritePin(S1_GPIO_Port,S1_Pin,GPIO_PIN_SET);
+			HAL_GPIO_WritePin(S0_GPIO_Port,S0_Pin,GPIO_PIN_SET);  
+			break;
+		// channel 5
+		case 5:
+			HAL_GPIO_WritePin(S2_GPIO_Port,S2_Pin,GPIO_PIN_SET);
+			HAL_GPIO_WritePin(S1_GPIO_Port,S1_Pin,GPIO_PIN_RESET);
+			HAL_GPIO_WritePin(S0_GPIO_Port,S0_Pin,GPIO_PIN_RESET);  
+			break;
+		// channel 6
+		case 6:
+			HAL_GPIO_WritePin(S2_GPIO_Port,S2_Pin,GPIO_PIN_SET);
+			HAL_GPIO_WritePin(S1_GPIO_Port,S1_Pin,GPIO_PIN_RESET);
+			HAL_GPIO_WritePin(S0_GPIO_Port,S0_Pin,GPIO_PIN_SET);  
+			break;
+		// channel 7
+		case 7:
+			HAL_GPIO_WritePin(S2_GPIO_Port,S2_Pin,GPIO_PIN_SET);
+			HAL_GPIO_WritePin(S1_GPIO_Port,S1_Pin,GPIO_PIN_SET);
+			HAL_GPIO_WritePin(S0_GPIO_Port,S0_Pin,GPIO_PIN_RESET);  
+			break;
+		// channel 8
+		case 8:
+			HAL_GPIO_WritePin(S2_GPIO_Port,S2_Pin,GPIO_PIN_SET);
+			HAL_GPIO_WritePin(S1_GPIO_Port,S1_Pin,GPIO_PIN_SET);
+			HAL_GPIO_WritePin(S0_GPIO_Port,S0_Pin,GPIO_PIN_SET);  
+			break;
+		// Default -> 2
+		default:
+			HAL_GPIO_WritePin(S2_GPIO_Port,S2_Pin,GPIO_PIN_RESET);
+			HAL_GPIO_WritePin(S1_GPIO_Port,S1_Pin,GPIO_PIN_RESET);
+			HAL_GPIO_WritePin(S0_GPIO_Port,S0_Pin,GPIO_PIN_SET);
+  }
+  
+}
+
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
+{
+	 if(GPIO_Pin == GPIO_PIN_0) {
+		 oled_cnt_test++;
+		 led_on=1;
+     led_off=0;		 
+	 }
+}
+
+/* USER CODE END 4 */
+
+/**
+  * @brief  This function is executed in case of error occurrence.
+  * @retval None
+  */
+void Error_Handler(void)
+{
+  /* USER CODE BEGIN Error_Handler_Debug */
+  /* User can add his own implementation to report the HAL error return state */
+
+  /* USER CODE END Error_Handler_Debug */
+}
+
+#ifdef  USE_FULL_ASSERT
+/**
+  * @brief  Reports the name of the source file and the source line number
+  *         where the assert_param error has occurred.
+  * @param  file: pointer to the source file name
+  * @param  line: assert_param error line source number
+  * @retval None
+  */
+void assert_failed(uint8_t *file, uint32_t line)
+{ 
+  /* USER CODE BEGIN 6 */
+  /* User can add his own implementation to report the file name and line number,
+     tex: printf("Wrong parameters value: file %s on line %d\r\n", file, line) */
+  /* USER CODE END 6 */
+}
+#endif /* USE_FULL_ASSERT */
+
+/************************ (C) COPYRIGHT STMicroelectronics *****END OF FILE****/
